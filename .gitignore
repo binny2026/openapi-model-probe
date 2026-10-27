@@ -1,0 +1,29 @@
+# 虚拟环境
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.idea/
+
+# 运行时数据（含密钥，切勿提交）
+probe_models.db
+probe_models.key
+
+# 环境变量（真实密钥）
+.env
+
+# 打包产物
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# 由 icon.png 生成的平台图标（如需可改为提交）
+icon.icns
+icon.ico
