@@ -1,91 +1,365 @@
-"""探测当前 API 凭证可访问的模型列表（PySide6 + QFluentWidgets 跨平台 GUI 版）。
+"""探测当前 API 凭证可访问的模型列表（PySide6 跨平台 GUI 版）。
 
 功能：
 - 管理多个 API 配置（名称 + Base URL + API Key），API Key 加密存储到本地 SQLite
 - 左栏 API 配置列表，右栏模型列表
-- 配置行内探测 / 编辑 / 删除，右键复制
-- 基于 QFluentWidgets 的 Fluent Design 深色主题
+- 配置行内探测，右键复制 / 查看编辑 / 删除
+- 纯 PySide6 内置控件 + 自定义 QSS 深色主题
 
 本文件自包含核心探测逻辑，不依赖、也不改动 probe_models.py。
 """
 
 import os
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
 
 from cryptography.fernet import Fernet
 from openai import OpenAI
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QSize, QStandardPaths, QThread, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import (
-    CardWidget,
-    IndeterminateProgressBar,
-    LineEdit,
-    MessageBox,
-    PasswordLineEdit,
-    PrimaryPushButton,
-    PushButton,
-    SubtitleLabel,
-    Theme,
-    setTheme,
-    setThemeColor,
-)
 
-# 以脚本所在目录为准加载本地数据库，保证从任意路径启动行为一致
+# 脚本目录（用于定位源码资源，如 icon.png）
 SCRIPT_DIR = Path(__file__).resolve().parent
-DB_PATH = SCRIPT_DIR / "probe_models.db"
-KEY_PATH = SCRIPT_DIR / "probe_models.key"
 ICON_PATH = SCRIPT_DIR / "icon.png"
+APP_NAME = "ai-model-prober"
+APP_DISPLAY_NAME = "AI 模型探测工具"
+CONFIG_ROW_HEIGHT = 44
+
+
+def _data_dir():
+    """返回跨平台用户数据目录，并迁移旧版脚本目录下的数据。"""
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    data_dir = Path(base)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # 迁移旧版数据（脚本目录 → 用户数据目录）
+    for name in ("probe_models.db", "probe_models.key"):
+        legacy = SCRIPT_DIR / name
+        target = data_dir / name
+        if legacy.exists() and not target.exists():
+            shutil.copy2(legacy, target)
+    return data_dir
+
+
+def _db_path():
+    return _data_dir() / "probe_models.db"
+
+
+def _key_path():
+    return _data_dir() / "probe_models.key"
+
+# 全局现代化深色主题样式（纯 QSS，无第三方依赖）
+STYLE_SHEET = """
+* {
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow, QWidget {
+    background-color: #1e1f24;
+    color: #e8e8ea;
+}
+
+QFrame#card {
+    background-color: #26272d;
+    border: 1px solid #34353c;
+    border-radius: 10px;
+}
+
+QLabel#cardTitle {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e8e8ea;
+}
+
+QPushButton {
+    background-color: #2e3038;
+    color: #e8e8ea;
+    border: 1px solid #3c3e47;
+    border-radius: 6px;
+    padding: 5px 14px;
+}
+
+QPushButton:hover {
+    background-color: #373943;
+    border-color: #4a4c57;
+}
+
+QPushButton:pressed {
+    background-color: #26282f;
+}
+
+QPushButton:disabled {
+    background-color: #26272d;
+    color: #6b6c73;
+    border-color: #2f3038;
+}
+
+QPushButton#primaryButton {
+    background-color: #4f8cff;
+    color: #ffffff;
+    border: none;
+}
+
+QPushButton#primaryButton:hover {
+    background-color: #6a9dff;
+}
+
+QPushButton#primaryButton:pressed {
+    background-color: #3f79e6;
+}
+
+QPushButton#primaryButton:disabled {
+    background-color: #3a4a63;
+    color: #8a93a8;
+}
+
+QPushButton#rowProbeBtn {
+    background-color: #4f8cff;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 2px 10px;
+}
+
+QPushButton#rowProbeBtn:hover {
+    background-color: #6a9dff;
+}
+
+QPushButton#copyButton {
+    background-color: #3a4a63;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 3px 8px;
+}
+
+QPushButton#copyButton:hover {
+    background-color: #4f8cff;
+}
+
+QLineEdit {
+    background-color: #1b1c21;
+    color: #e8e8ea;
+    border: 1px solid #3c3e47;
+    border-radius: 6px;
+    padding: 6px 10px;
+    selection-background-color: #4f8cff;
+}
+
+QLineEdit:focus {
+    border-color: #4f8cff;
+}
+
+QListWidget {
+    background-color: #1b1c21;
+    border: 1px solid #34353c;
+    border-radius: 6px;
+    outline: none;
+}
+
+QListWidget::item {
+    color: #d4d5da;
+}
+
+QListWidget::item:hover {
+    background-color: #2e3038;
+}
+
+QListWidget::item:selected {
+    background-color: #3a4a63;
+    color: #ffffff;
+}
+
+QListWidget QWidget {
+    background: transparent;
+}
+
+QTableWidget {
+    background-color: #1b1c21;
+    border: 1px solid #34353c;
+    border-radius: 6px;
+    gridline-color: #2e3038;
+    alternate-background-color: #222329;
+}
+
+QHeaderView::section {
+    background-color: #2e3038;
+    color: #b9bac2;
+    border: none;
+    border-right: 1px solid #34353c;
+    border-bottom: 1px solid #34353c;
+    padding: 6px 8px;
+    font-weight: 600;
+}
+
+QTableWidget::item {
+    padding: 6px 8px;
+}
+
+QTableWidget::item:selected {
+    background-color: #3a4a63;
+    color: #ffffff;
+}
+
+QMenu {
+    background-color: #26272d;
+    border: 1px solid #34353c;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+QMenu::item {
+    padding: 6px 20px;
+    border-radius: 4px;
+}
+
+QMenu::item:selected {
+    background-color: #4f8cff;
+    color: #ffffff;
+}
+
+QMenu::separator {
+    height: 1px;
+    background: #34353c;
+    margin: 4px 8px;
+}
+
+QDialog, QMessageBox {
+    background-color: #26272d;
+}
+
+QStatusBar {
+    background-color: #26272d;
+    color: #9a9ba0;
+    border-top: 1px solid #34353c;
+}
+
+QProgressBar#loadingBar {
+    background-color: #2e3038;
+    border: none;
+    border-radius: 2px;
+}
+
+QProgressBar#loadingBar::chunk {
+    background-color: #4f8cff;
+    border-radius: 2px;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #3c3e47;
+    border-radius: 5px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #4a4c57;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:horizontal {
+    background: #3c3e47;
+    border-radius: 5px;
+    min-width: 30px;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+"""
 
 
 def show_message_box(title, content, parent):
-    """单按钮（确定）Fluent 消息框。"""
-    box = MessageBox(title, content, parent)
-    box.yesButton.setText("确定")
-    box.cancelButton.hide()
-    box.exec()
+    """单按钮（确定）警告消息框。"""
+    QMessageBox.warning(parent, title, content)
 
 
 def confirm_message_box(title, content, parent):
-    """确定 / 取消 二选一 Fluent 消息框，返回是否确定。"""
-    box = MessageBox(title, content, parent)
-    box.yesButton.setText("确定")
-    box.cancelButton.setText("取消")
-    return box.exec() == QDialog.DialogCode.Accepted
+    """确定 / 取消 二选一消息框，返回是否确定。"""
+    ret = QMessageBox.question(
+        parent,
+        title,
+        content,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    )
+    return ret == QMessageBox.StandardButton.Yes
+
+
+def _make_eye_icon(revealed):
+    """生成小眼睛图标：revealed=True 表示密钥已明文显示（画斜线），否则睁眼。"""
+    pm = QPixmap(18, 18)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#9a9ba0"))
+    pen.setWidthF(1.6)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(2, 5, 14, 7)
+    if revealed:
+        painter.drawLine(1, 16, 16, 1)
+    else:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#9a9ba0"))
+        painter.drawEllipse(7, 7, 3, 3)
+    painter.end()
+    return QIcon(pm)
 
 
 def _load_or_create_key():
     """加载本机密钥；不存在则生成并写入 0600 权限的密钥文件。"""
-    if KEY_PATH.exists():
-        return KEY_PATH.read_bytes().strip()
+    key_path = _key_path()
+    if key_path.exists():
+        return key_path.read_bytes().strip()
     key = Fernet.generate_key()
-    KEY_PATH.write_bytes(key)
+    key_path.write_bytes(key)
     try:
-        os.chmod(KEY_PATH, 0o600)
+        os.chmod(key_path, 0o600)
     except OSError:
         pass  # 某些平台不支持 chmod，忽略即可
     return key
 
 
 def _connect():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(_db_path())
 
 
 def _init_db():
@@ -193,9 +467,9 @@ def delete_config(config_id):
 class ModelProbeWorker(QThread):
     """后台线程执行模型探测，避免网络请求阻塞 UI。"""
 
-    models_ready = Signal(list)  # 携带按 id 排序后的模型对象列表
-    failed = Signal(str)         # 携带错误信息
-    cancelled = Signal()         # 探测被用户取消
+    models_ready = Signal(list)
+    failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, base_url, api_key, parent=None):
         super().__init__(parent)
@@ -203,7 +477,11 @@ class ModelProbeWorker(QThread):
         self.api_key = api_key
 
     def run(self):
-        client_options = {"api_key": self.api_key}
+        client_options = {
+            "api_key": self.api_key,
+            "timeout": 10.0,
+            "max_retries": 0,
+        }
         if self.base_url:
             client_options["base_url"] = self.base_url
 
@@ -234,22 +512,30 @@ class ConfigDialog(QDialog):
     def __init__(self, parent=None, name="", base_url="", api_key=""):
         super().__init__(parent)
         self.setWindowTitle("API 配置")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(560)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        self.name_edit = LineEdit()
-        self.name_edit.setText(name)
+        self.name_edit = QLineEdit(name)
+        self.name_edit.setMinimumHeight(36)
         self.name_edit.setPlaceholderText("例如：OpenAI / 本地 Ollama")
 
-        self.base_url_edit = LineEdit()
-        self.base_url_edit.setText(base_url)
+        self.base_url_edit = QLineEdit(base_url)
+        self.base_url_edit.setMinimumHeight(36)
         self.base_url_edit.setPlaceholderText("留空使用默认 https://api.openai.com/v1")
 
-        self.api_key_edit = PasswordLineEdit()
-        self.api_key_edit.setText(api_key)
+        self.api_key_edit = QLineEdit(api_key)
+        self.api_key_edit.setMinimumHeight(36)
+        self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_edit.setPlaceholderText("sk-...")
+        self._key_revealed = False
+        self._eye_action = self.api_key_edit.addAction(
+            _make_eye_icon(False), QLineEdit.ActionPosition.TrailingPosition
+        )
+        self._eye_action.triggered.connect(self._toggle_key_visibility)
 
         form.addRow("名称", self.name_edit)
         form.addRow("Base URL", self.base_url_edit)
@@ -257,16 +543,22 @@ class ConfigDialog(QDialog):
         layout.addLayout(form)
 
         btn_row = QHBoxLayout()
-        cancel_btn = PushButton()
-        cancel_btn.setText("取消")
+        cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
-        save_btn = PrimaryPushButton()
-        save_btn.setText("保存")
+        save_btn = QPushButton("保存")
+        save_btn.setObjectName("primaryButton")
         save_btn.clicked.connect(self._on_accept)
         btn_row.addStretch(1)
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(save_btn)
         layout.addLayout(btn_row)
+
+    def _toggle_key_visibility(self):
+        self._key_revealed = not self._key_revealed
+        self.api_key_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if self._key_revealed else QLineEdit.EchoMode.Password
+        )
+        self._eye_action.setIcon(_make_eye_icon(self._key_revealed))
 
     def _on_accept(self):
         if not self.name_edit.text().strip():
@@ -312,8 +604,9 @@ class ConfigRowWidget(QWidget):
 
     def __init__(self, name, base_url, on_probe, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(44)
+        self.setFixedHeight(CONFIG_ROW_HEIGHT)
         self.full_name = name
+        self._on_probe = on_probe
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
@@ -330,8 +623,9 @@ class ConfigRowWidget(QWidget):
         text_layout.addWidget(self.name_label, 0)
         text_layout.addWidget(self.url_label, 1)
 
-        self.probe_btn = PrimaryPushButton()
-        self.probe_btn.setText("探测")
+        self.probe_btn = QPushButton("探测")
+        self.probe_btn.setObjectName("rowProbeBtn")
+        self.probe_btn.setFixedHeight(28)
         self.probe_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.probe_btn.clicked.connect(on_probe)
 
@@ -344,6 +638,14 @@ class ConfigRowWidget(QWidget):
             metrics.elidedText(self.full_name, Qt.TextElideMode.ElideRight, width)
         )
         self.name_label.setFixedWidth(width)
+
+    def mouseDoubleClickEvent(self, event):
+        # 双击按钮区域交给按钮处理，双击其他区域触发探测
+        if not self.probe_btn.geometry().contains(event.position().toPoint()):
+            self._on_probe()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
 
 
 class ConfigListWidget(QListWidget):
@@ -384,38 +686,31 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
-        # 顶部工具栏
-        toolbar = QHBoxLayout()
-        self.cancel_btn = PushButton()
-        self.cancel_btn.setText("取消")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._on_cancel)
-        toolbar.addWidget(self.cancel_btn)
-        toolbar.addStretch(1)
-        root.addLayout(toolbar)
-
         # 左右分栏（左栏固定宽度）
         body = QHBoxLayout()
         body.setSpacing(12)
 
         # 左栏：API 配置卡片
-        left_card = CardWidget()
+        left_card = QFrame()
+        left_card.setObjectName("card")
         left_card.setFixedWidth(380)
         left_layout = QVBoxLayout(left_card)
         left_layout.setContentsMargins(16, 16, 16, 16)
         left_layout.setSpacing(12)
 
         left_header = QHBoxLayout()
-        left_title = SubtitleLabel("API 配置")
+        left_title = QLabel("API 配置")
+        left_title.setObjectName("cardTitle")
         left_header.addWidget(left_title)
         left_header.addStretch(1)
-        add_btn = PrimaryPushButton()
-        add_btn.setText("新增")
+        add_btn = QPushButton("新增")
+        add_btn.setObjectName("primaryButton")
         add_btn.clicked.connect(self._on_add)
         left_header.addWidget(add_btn)
         left_layout.addLayout(left_header)
 
         self.api_list = ConfigListWidget()
+        self.api_list.setSpacing(8)
         self.api_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.api_list.customContextMenuRequested.connect(self._on_api_list_menu)
         left_layout.addWidget(self.api_list, 1)
@@ -423,20 +718,26 @@ class MainWindow(QMainWindow):
         body.addWidget(left_card)
 
         # 右栏：模型列表卡片
-        right_card = CardWidget()
+        right_card = QFrame()
+        right_card.setObjectName("card")
         right_layout = QVBoxLayout(right_card)
         right_layout.setContentsMargins(16, 16, 16, 16)
         right_layout.setSpacing(12)
 
         right_header = QHBoxLayout()
-        right_title = SubtitleLabel("模型列表")
+        right_title = QLabel("模型列表")
+        right_title.setObjectName("cardTitle")
         right_header.addWidget(right_title)
         right_header.addStretch(1)
-        self.loading_bar = IndeterminateProgressBar()
-        self.loading_bar.setFixedSize(24, 24)
-        self.loading_bar.hide()
-        right_header.addWidget(self.loading_bar)
         right_layout.addLayout(right_header)
+
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setRange(0, 0)
+        self.loading_bar.setTextVisible(False)
+        self.loading_bar.setObjectName("loadingBar")
+        self.loading_bar.setFixedHeight(4)
+        self.loading_bar.hide()
+        right_layout.addWidget(self.loading_bar)
 
         self.model_table = QTableWidget(0, 3)
         self.model_table.setHorizontalHeaderLabels(["模型 ID", "Owner", ""])
@@ -469,7 +770,7 @@ class MainWindow(QMainWindow):
                 config["base_url"],
                 on_probe=lambda checked=False, c=config: self._probe_config(c),
             )
-            item.setSizeHint(row.sizeHint())
+            item.setSizeHint(QSize(0, CONFIG_ROW_HEIGHT))
             self.api_list.addItem(item)
             self.api_list.setItemWidget(item, row)
         self.api_list.update_name_widths()
@@ -589,11 +890,6 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self._on_finished)
         self.worker.start()
 
-    def _on_cancel(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.statusBar().showMessage("正在取消…")
-
     def _on_models_ready(self, models):
         self._clear_copy_button()
         self.model_table.setRowCount(len(models))
@@ -604,7 +900,7 @@ class MainWindow(QMainWindow):
 
     def _on_failed(self, message):
         self.statusBar().showMessage("探测失败")
-        show_message_box("探测失败", f"无法获取模型列表：\n{message}", self)
+        QMessageBox.critical(self, "探测失败", f"无法获取模型列表：\n{message}")
 
     def _on_cancelled(self):
         self.statusBar().showMessage("已取消")
@@ -638,8 +934,8 @@ class MainWindow(QMainWindow):
         if self._copy_btn_row == row:
             return
         self._clear_copy_button()
-        btn = PushButton()
-        btn.setText("复制")
+        btn = QPushButton("复制")
+        btn.setObjectName("copyButton")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(lambda checked=False, r=row: self._copy_model_id(r))
         self.model_table.setCellWidget(row, 2, btn)
@@ -659,7 +955,6 @@ class MainWindow(QMainWindow):
             self._copy_text(item.text())
 
     def _set_running(self, running):
-        self.cancel_btn.setEnabled(running)
         self.api_list.setEnabled(not running)
         self.loading_bar.setVisible(running)
 
@@ -670,12 +965,34 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def _apply_macos_menu_name():
+    """macOS 未打包运行时，让菜单栏显示应用名而不是 Python。"""
+    if sys.platform != "darwin":
+        return
+    try:
+        from Foundation import NSProcessInfo
+        NSProcessInfo.processInfo().setProcessName_(APP_DISPLAY_NAME)
+    except Exception:
+        pass
+    try:
+        from AppKit import NSApp
+        main_menu = NSApp.mainMenu()
+        if main_menu is not None and main_menu.numberOfItems() > 0:
+            app_item = main_menu.itemAtIndex_(0)
+            if app_item is not None:
+                app_item.setTitle_(APP_DISPLAY_NAME)
+    except Exception:
+        pass
+
+
 def main():
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    _apply_macos_menu_name()
+    app.setStyleSheet(STYLE_SHEET)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
-    setTheme(Theme.DARK)
-    setThemeColor("#4f8cff")
     window = MainWindow()
     window.show()
     return app.exec()

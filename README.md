@@ -19,4 +19,4 @@ python probe_models_gui.py
 
 ## 数据存储
 
-配置保存在脚本同目录的 `probe_models.db`（SQLite），API Key 使用 Fernet 加密，密钥文件 `probe_models.key` 与本机绑定。
+配置保存在系统用户数据目录（`QStandardPaths.AppDataLocation`，如 macOS 的 `~/Library/Application Support/ai-model-prober`），API Key 使用 Fernet 加密，密钥文件与本机绑定。

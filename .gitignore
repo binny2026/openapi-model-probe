@@ -23,7 +23,3 @@ dist/
 
 # macOS
 .DS_Store
-
-# 由 icon.png 生成的平台图标（如需可改为提交）
-icon.icns
-icon.ico
