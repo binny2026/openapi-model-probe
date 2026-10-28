@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     strategy:
@@ -45,8 +48,67 @@ jobs:
             --collect-all dotenv \
             probe_models_gui.py
 
+      - name: Archive macOS application
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          tar -czf "release-assets/ai-model-prober-macos-${{ runner.arch }}.tar.gz" -C dist ai-model-prober.app
+
+      - name: Archive Windows application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Compress-Archive -Path dist/ai-model-prober.exe -DestinationPath "release-assets/ai-model-prober-windows-${{ runner.arch }}.zip"
+
+      - name: Archive Linux application
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          tar -czf "release-assets/ai-model-prober-linux-${{ runner.arch }}.tar.gz" -C dist ai-model-prober
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ai-model-prober-${{ matrix.os }}
           path: dist/
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive-${{ matrix.os }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-archive-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
