@@ -92,6 +92,36 @@ jobs:
       group: release-${{ github.ref }}
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          current_commit=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")
+          previous_tag=''
+          if git rev-parse --verify "${current_commit}^" >/dev/null 2>&1; then
+            previous_tag=$(git describe --tags --match 'v*' --abbrev=0 "${current_commit}^" 2>/dev/null || true)
+          fi
+          range="$current_commit"
+          if [ -n "$previous_tag" ]; then
+            range="refs/tags/${previous_tag}..${current_commit}"
+          fi
+          {
+            printf '## 更新提交\n\n'
+            git log --reverse --format="- %s ([%h](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/%H))" "$range" --
+            printf '\n'
+            if [ -n "$previous_tag" ]; then
+              printf '**Full Changelog**: %s/%s/compare/%s...%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$previous_tag" "$RELEASE_TAG"
+            else
+              printf '**Full Changelog**: %s/%s/commits/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+            fi
+          } > "$RUNNER_TEMP/release-notes.md"
+
       - name: Download release archives
         uses: actions/download-artifact@v4
         with:
@@ -108,7 +138,8 @@ jobs:
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
             gh release create "$RELEASE_TAG" release-assets/* \
-              --verify-tag --title "$RELEASE_TAG" --generate-notes
+              --verify-tag --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
