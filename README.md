@@ -2,6 +2,7 @@
 
 基于 PySide6 的跨平台桌面工具，用于管理多个 OpenAI 兼容 API 配置并探测可用模型列表。
 
+![img.png](img.png)
 ## 功能
 
 - 管理多个 API 配置（名称 / Base URL / API Key），API Key 加密存储到本地 SQLite
