@@ -35,6 +35,7 @@ jobs:
           pip install -r requirements.txt pyinstaller
 
       - name: Build with PyInstaller
+        shell: bash
         run: |
           pyinstaller ${{ matrix.onefile }} --windowed --noconfirm --clean \
             --name ai-model-prober --icon ${{ matrix.icon }} \
